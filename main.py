@@ -493,4 +493,3 @@ def extract(request: EmailRequest):
         data["odoo_error"] = error
 
     return data
-````
