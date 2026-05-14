@@ -9,12 +9,14 @@ from openai import OpenAI
 app = FastAPI()
 
 # =====================================================
-# OPENROUTER CLIENT
+# OPENROUTER CONFIG
 # =====================================================
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=os.getenv("OPENROUTER_API_KEY")
 )
+
+MODEL_NAME = "google/gemma-3-27b-it:free"
 
 # =====================================================
 # ODOO CONFIG
@@ -47,7 +49,7 @@ def home():
 # =====================================================
 def clean_html(raw_html):
 
-    text = re.sub(r'<.*?>', '\n', raw_html)
+    text = re.sub('<.*?>', '\n', raw_html)
 
     text = re.sub(r'\n+', '\n', text)
 
@@ -87,24 +89,28 @@ def ai_extract(text):
     prompt = f"""
 You are a CRM lead extraction assistant.
 
-Extract:
-- name
-- phone
-- email
-- product
-- description
-- address
-- city
-- state
-- pincode
-- country
+Extract the following details from the email.
 
 RULES:
-- Ignore IndiaMART support details
-- Ignore platform phone numbers
-- Extract actual customer details
-- Return ONLY JSON
-- Keep blank if unavailable
+- Ignore IndiaMART support numbers/emails
+- Ignore platform contact details
+- Extract actual buyer details only
+- Return ONLY valid JSON
+- If value unavailable return ""
+
+JSON FORMAT:
+{{
+"name":"",
+"phone":"",
+"email":"",
+"product":"",
+"description":"",
+"address":"",
+"city":"",
+"state":"",
+"pincode":"",
+"country":""
+}}
 
 EMAIL:
 {text}
@@ -114,7 +120,7 @@ EMAIL:
 
         response = client.chat.completions.create(
 
-            model="deepseek/deepseek-chat-v3-0324:free",
+            model=MODEL_NAME,
 
             messages=[
                 {
@@ -126,14 +132,15 @@ EMAIL:
             temperature=0.1
         )
 
-        result = response.choices[0].message.content
+        result = response.choices[0].message.content.strip()
+
+        print("RAW AI:", result)
 
         result = result.replace("```json", "")
         result = result.replace("```", "")
+        result = result.strip()
 
-        data = json.loads(result)
-
-        return data
+        return json.loads(result)
 
     except Exception as e:
 
@@ -153,35 +160,37 @@ EMAIL:
         }
 
 # =====================================================
-# AI REPLY GENERATOR
+# AI EMAIL REPLY
 # =====================================================
 def generate_ai_reply(email_text, lead_data):
 
     prompt = f"""
 You are a professional pharma sales assistant.
 
-Generate a professional customer email reply.
+Write a professional email reply.
 
 CUSTOMER EMAIL:
 {email_text}
 
-LEAD DATA:
+CUSTOMER DATA:
 {json.dumps(lead_data, indent=2)}
 
 RULES:
-- Professional tone
+- Professional
 - Human sounding
 - Under 120 words
+- Thank customer
+- Mention product if available
 - No fake pricing
-- No fake commitments
-- Output only email body
+- No fake promises
+- Plain email format only
 """
 
     try:
 
         response = client.chat.completions.create(
 
-            model="deepseek/deepseek-chat-v3-0324:free",
+            model=MODEL_NAME,
 
             messages=[
                 {
@@ -193,7 +202,11 @@ RULES:
             temperature=0.4
         )
 
-        return response.choices[0].message.content.strip()
+        reply = response.choices[0].message.content.strip()
+
+        print("AI REPLY:", reply)
+
+        return reply
 
     except Exception as e:
 
@@ -222,10 +235,6 @@ def validate(data):
             '',
             data["phone"]
         )
-
-    if data.get("email"):
-
-        data["email"] = data["email"].strip()
 
     return data
 
@@ -266,41 +275,20 @@ def create_odoo_lead(data, ai_reply):
             {}
         )
 
-        if not uid:
-            return None, "Odoo Authentication Failed"
-
         models = xmlrpc.client.ServerProxy(
             f"{ODOO_URL}/xmlrpc/2/object",
             allow_none=True
         )
 
         # =====================================================
-        # SEARCH EXISTING CONTACT
+        # CREATE CONTACT
         # =====================================================
         partner_id = None
 
-        if data.get("email"):
-
-            existing_partner = models.execute_kw(
-                ODOO_DB,
-                uid,
-                ODOO_PASSWORD,
-                'res.partner',
-                'search',
-                [[['email', '=', data.get("email")]]],
-                {'limit': 1}
-            )
-
-            if existing_partner:
-                partner_id = existing_partner[0]
-
-        # =====================================================
-        # CREATE CONTACT IF NOT EXISTS
-        # =====================================================
-        if not partner_id:
+        if data.get("email") or data.get("name"):
 
             partner_vals = {
-                'name': data.get("name") or "Unknown",
+                'name': data.get("name") or "Unknown Customer",
                 'email': data.get("email") or "",
                 'phone': data.get("phone") or "",
                 'street': data.get("address") or "",
@@ -340,12 +328,12 @@ def create_odoo_lead(data, ai_reply):
             )
 
         # =====================================================
-        # CREATE LEAD
+        # LEAD VALUES
         # =====================================================
         lead_vals = {
-            'name': data.get('product') or "New Lead",
+            'name': data.get('product') or "Website Inquiry",
             'partner_id': partner_id,
-            'contact_name': data.get('name') or "",
+            'contact_name': data.get('name') or "Unknown Customer",
             'phone': data.get('phone') or "",
             'email_from': data.get('email') or "",
             'street': data.get('address') or "",
@@ -354,6 +342,9 @@ def create_odoo_lead(data, ai_reply):
             'description': desc_text.strip(),
         }
 
+        # =====================================================
+        # CREATE LEAD
+        # =====================================================
         lead_id = models.execute_kw(
             ODOO_DB,
             uid,
@@ -366,12 +357,10 @@ def create_odoo_lead(data, ai_reply):
         # =====================================================
         # CHATTER MESSAGE
         # =====================================================
-        safe_reply = ai_reply.replace("\n", "<br/>")
-
         chatter_html = f"""
 <div>
 <h3>🤖 AI Auto Reply Sent to Customer</h3>
-<p>{safe_reply}</p>
+<p>{ai_reply.replace(chr(10), '<br/>')}</p>
 </div>
 """
 
@@ -389,13 +378,13 @@ def create_odoo_lead(data, ai_reply):
         )
 
         # =====================================================
-        # SEND EMAIL FROM ODOO
+        # SEND EMAIL
         # =====================================================
         if data.get("email"):
 
             email_html = f"""
-<div style="font-family: Arial; font-size:14px;">
-<p>{safe_reply}</p>
+<div style="font-family:Arial;font-size:14px;">
+<p>{ai_reply.replace(chr(10), '<br/>')}</p>
 </div>
 """
 
@@ -404,7 +393,6 @@ def create_odoo_lead(data, ai_reply):
                 'body_html': email_html,
                 'email_to': data.get("email"),
                 'email_from': ODOO_USERNAME,
-                'reply_to': ODOO_USERNAME,
                 'auto_delete': False,
             }
 
@@ -417,7 +405,7 @@ def create_odoo_lead(data, ai_reply):
                 [mail_values]
             )
 
-            # FORCE SEND MAIL
+            # FORCE SEND
             models.execute_kw(
                 ODOO_DB,
                 uid,
@@ -444,7 +432,7 @@ def extract(request: EmailRequest):
     text = clean_html(request.text)
 
     # =====================================================
-    # EXTRACT DATA
+    # AI + REGEX EXTRACTION
     # =====================================================
     ai_data = ai_extract(text)
 
@@ -453,6 +441,17 @@ def extract(request: EmailRequest):
     data = merge(ai_data, regex_data)
 
     data = validate(data)
+
+    # =====================================================
+    # FALLBACKS
+    # =====================================================
+    if not data.get("name"):
+
+        data["name"] = "Unknown Customer"
+
+    if not data.get("product"):
+
+        data["product"] = request.subject or "Website Inquiry"
 
     print("FINAL DATA:", data)
 
@@ -463,11 +462,7 @@ def extract(request: EmailRequest):
         data.get("phone") or data.get("email")
     )
 
-    has_context = bool(
-        data.get("name") or data.get("product")
-    )
-
-    if not (has_contact and has_context):
+    if not has_contact:
 
         data["odoo_error"] = "Skipped incomplete lead"
 
@@ -494,6 +489,8 @@ def extract(request: EmailRequest):
     data["odoo_lead_id"] = lead_id
 
     if error:
+
         data["odoo_error"] = error
 
     return data
+````
