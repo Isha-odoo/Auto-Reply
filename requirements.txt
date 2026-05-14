@@ -1,4 +1,6 @@
 fastapi
 uvicorn
+google-genai
 pydantic
-openai
+requests
+python-multipart
