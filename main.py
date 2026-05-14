@@ -8,33 +8,33 @@ from openai import OpenAI
 
 app = FastAPI()
 
-# =========================
+# =====================================================
 # OPENROUTER CLIENT
-# =========================
+# =====================================================
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=os.getenv("OPENROUTER_API_KEY")
 )
 
-# =========================
+# =====================================================
 # ODOO CONFIG
-# =========================
+# =====================================================
 ODOO_URL = os.getenv("ODOO_URL")
 ODOO_DB = os.getenv("ODOO_DB")
 ODOO_USERNAME = os.getenv("ODOO_USERNAME")
 ODOO_PASSWORD = os.getenv("ODOO_API_KEY")
 
-# =========================
+# =====================================================
 # REQUEST SCHEMA
-# =========================
+# =====================================================
 class EmailRequest(BaseModel):
     text: str
     from_email: str = ""
     subject: str = ""
 
-# =========================
+# =====================================================
 # HEALTH CHECK
-# =========================
+# =====================================================
 @app.get("/")
 def home():
     return {
@@ -42,20 +42,20 @@ def home():
         "message": "AI CRM Automation Running"
     }
 
-# =========================
+# =====================================================
 # CLEAN HTML
-# =========================
+# =====================================================
 def clean_html(raw_html):
 
-    text = re.sub('<.*?>', '\n', raw_html)
+    text = re.sub(r'<.*?>', '\n', raw_html)
 
     text = re.sub(r'\n+', '\n', text)
 
     return text.strip()
 
-# =========================
+# =====================================================
 # REGEX EXTRACTION
-# =========================
+# =====================================================
 def regex_extract(text):
 
     phones = re.findall(
@@ -79,9 +79,9 @@ def regex_extract(text):
         "pincode": pincodes
     }
 
-# =========================
+# =====================================================
 # AI EXTRACTION
-# =========================
+# =====================================================
 def ai_extract(text):
 
     prompt = f"""
@@ -100,9 +100,11 @@ Extract:
 - country
 
 RULES:
-- Ignore IndiaMART support info
-- Ignore platform numbers
-- Return ONLY valid JSON
+- Ignore IndiaMART support details
+- Ignore platform phone numbers
+- Extract actual customer details
+- Return ONLY JSON
+- Keep blank if unavailable
 
 EMAIL:
 {text}
@@ -129,7 +131,9 @@ EMAIL:
         result = result.replace("```json", "")
         result = result.replace("```", "")
 
-        return json.loads(result)
+        data = json.loads(result)
+
+        return data
 
     except Exception as e:
 
@@ -148,9 +152,9 @@ EMAIL:
             "country": ""
         }
 
-# =========================
+# =====================================================
 # AI REPLY GENERATOR
-# =========================
+# =====================================================
 def generate_ai_reply(email_text, lead_data):
 
     prompt = f"""
@@ -166,10 +170,11 @@ LEAD DATA:
 
 RULES:
 - Professional tone
-- Under 120 words
 - Human sounding
+- Under 120 words
 - No fake pricing
 - No fake commitments
+- Output only email body
 """
 
     try:
@@ -199,15 +204,15 @@ Dear Customer,
 
 Thank you for your inquiry.
 
-Our team will contact you shortly.
+Our sales team will contact you shortly.
 
 Regards,
 Sales Team
 """
 
-# =========================
+# =====================================================
 # VALIDATION
-# =========================
+# =====================================================
 def validate(data):
 
     if data.get("phone"):
@@ -218,11 +223,15 @@ def validate(data):
             data["phone"]
         )
 
+    if data.get("email"):
+
+        data["email"] = data["email"].strip()
+
     return data
 
-# =========================
+# =====================================================
 # MERGE LOGIC
-# =========================
+# =====================================================
 def merge(ai_data, regex_data):
 
     if not ai_data.get("phone") and regex_data.get("phone"):
@@ -235,13 +244,16 @@ def merge(ai_data, regex_data):
 
     return ai_data
 
+# =====================================================
+# CREATE ODOO LEAD
+# =====================================================
 def create_odoo_lead(data, ai_reply):
 
     try:
 
-        # =========================
+        # =====================================================
         # LOGIN
-        # =========================
+        # =====================================================
         common = xmlrpc.client.ServerProxy(
             f"{ODOO_URL}/xmlrpc/2/common",
             allow_none=True
@@ -254,17 +266,38 @@ def create_odoo_lead(data, ai_reply):
             {}
         )
 
+        if not uid:
+            return None, "Odoo Authentication Failed"
+
         models = xmlrpc.client.ServerProxy(
             f"{ODOO_URL}/xmlrpc/2/object",
             allow_none=True
         )
 
-        # =========================
-        # CREATE CONTACT
-        # =========================
+        # =====================================================
+        # SEARCH EXISTING CONTACT
+        # =====================================================
         partner_id = None
 
-        if data.get("email") or data.get("name"):
+        if data.get("email"):
+
+            existing_partner = models.execute_kw(
+                ODOO_DB,
+                uid,
+                ODOO_PASSWORD,
+                'res.partner',
+                'search',
+                [[['email', '=', data.get("email")]]],
+                {'limit': 1}
+            )
+
+            if existing_partner:
+                partner_id = existing_partner[0]
+
+        # =====================================================
+        # CREATE CONTACT IF NOT EXISTS
+        # =====================================================
+        if not partner_id:
 
             partner_vals = {
                 'name': data.get("name") or "Unknown",
@@ -284,9 +317,9 @@ def create_odoo_lead(data, ai_reply):
                 [partner_vals]
             )
 
-        # =========================
+        # =====================================================
         # DESCRIPTION
-        # =========================
+        # =====================================================
         desc_text = data.get("description") or ""
 
         address_parts = [
@@ -300,14 +333,15 @@ def create_odoo_lead(data, ai_reply):
         valid_address = [x for x in address_parts if x]
 
         if valid_address:
+
             desc_text += (
                 "\n\nFull Address: "
                 + ", ".join(valid_address)
             )
 
-        # =========================
+        # =====================================================
         # CREATE LEAD
-        # =========================
+        # =====================================================
         lead_vals = {
             'name': data.get('product') or "New Lead",
             'partner_id': partner_id,
@@ -329,26 +363,15 @@ def create_odoo_lead(data, ai_reply):
             [lead_vals]
         )
 
-        # =========================
-        # SAFE AI REPLY
-        # =========================
-        if not ai_reply:
-            ai_reply = """
-Thank you for your inquiry.
+        # =====================================================
+        # CHATTER MESSAGE
+        # =====================================================
+        safe_reply = ai_reply.replace("\n", "<br/>")
 
-Our sales team will contact you shortly.
-
-Regards
-Sales Team
-"""
-
-        # =========================
-        # CHATTER
-        # =========================
         chatter_html = f"""
 <div>
 <h3>🤖 AI Auto Reply Sent to Customer</h3>
-<p>{ai_reply.replace(chr(10), '<br/>')}</p>
+<p>{safe_reply}</p>
 </div>
 """
 
@@ -365,14 +388,14 @@ Sales Team
             }
         )
 
-        # =========================
-        # SEND EMAIL
-        # =========================
+        # =====================================================
+        # SEND EMAIL FROM ODOO
+        # =====================================================
         if data.get("email"):
 
             email_html = f"""
-<div style="font-family:Arial,sans-serif;font-size:14px;">
-<p>{ai_reply.replace(chr(10), '<br/>')}</p>
+<div style="font-family: Arial; font-size:14px;">
+<p>{safe_reply}</p>
 </div>
 """
 
@@ -381,6 +404,7 @@ Sales Team
                 'body_html': email_html,
                 'email_to': data.get("email"),
                 'email_from': ODOO_USERNAME,
+                'reply_to': ODOO_USERNAME,
                 'auto_delete': False,
             }
 
@@ -393,7 +417,7 @@ Sales Team
                 [mail_values]
             )
 
-            # FORCE SEND
+            # FORCE SEND MAIL
             models.execute_kw(
                 ODOO_DB,
                 uid,
@@ -411,70 +435,17 @@ Sales Team
 
         return None, str(e)
 
-        # =========================
-        # CHATTER MESSAGE
-        # =========================
-        chatter_body = f"""
-<h3>🤖 AI Auto Reply Sent to Customer</h3>
-
-<p>
-{ai_reply.replace(chr(10), '<br/>')}
-</p>
-"""
-
-        models.execute_kw(
-            ODOO_DB,
-            uid,
-            ODOO_PASSWORD,
-            'crm.lead',
-            'message_post',
-            [[lead_id]],
-            {
-                'body': chatter_body,
-                'body_is_html': True
-            }
-        )
-
-        # =========================
-        # SEND EMAIL FROM ODOO
-        # =========================
-        if data.get("email"):
-
-            mail_values = {
-                'subject': f"Re: {data.get('product') or 'Your Inquiry'}",
-                'body_html': f"""
-<p>
-{ai_reply.replace(chr(10), '<br/>')}
-</p>
-""",
-                'email_to': data.get("email"),
-                'email_from': f"Sales Team <{ODOO_USERNAME}>",
-                'state': 'outgoing'
-            }
-
-            models.execute_kw(
-                ODOO_DB,
-                uid,
-                ODOO_PASSWORD,
-                'mail.mail',
-                'create',
-                [mail_values]
-            )
-
-        return lead_id, None
-
-    except Exception as e:
-
-        return None, str(e)
-
-# =========================
+# =====================================================
 # MAIN API
-# =========================
+# =====================================================
 @app.post("/extract")
 def extract(request: EmailRequest):
 
     text = clean_html(request.text)
 
+    # =====================================================
+    # EXTRACT DATA
+    # =====================================================
     ai_data = ai_extract(text)
 
     regex_data = regex_extract(text)
@@ -485,6 +456,9 @@ def extract(request: EmailRequest):
 
     print("FINAL DATA:", data)
 
+    # =====================================================
+    # VALIDATION
+    # =====================================================
     has_contact = bool(
         data.get("phone") or data.get("email")
     )
@@ -499,6 +473,9 @@ def extract(request: EmailRequest):
 
         return data
 
+    # =====================================================
+    # GENERATE AI REPLY
+    # =====================================================
     ai_reply = generate_ai_reply(
         text,
         data
@@ -506,6 +483,9 @@ def extract(request: EmailRequest):
 
     data["ai_reply"] = ai_reply
 
+    # =====================================================
+    # CREATE ODOO LEAD
+    # =====================================================
     lead_id, error = create_odoo_lead(
         data,
         ai_reply
@@ -514,7 +494,6 @@ def extract(request: EmailRequest):
     data["odoo_lead_id"] = lead_id
 
     if error:
-
         data["odoo_error"] = error
 
     return data
