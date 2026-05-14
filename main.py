@@ -260,7 +260,6 @@ def create_odoo_lead(data, ai_reply):
         valid_address = [x for x in address_parts if x]
 
         if valid_address:
-
             desc_text += (
                 "\n\nFull Address: "
                 + ", ".join(valid_address)
@@ -270,21 +269,13 @@ def create_odoo_lead(data, ai_reply):
         # LEAD VALUES
         # =========================
         lead_vals = {
-
             'name': data.get('product') or "New Lead",
-
             'contact_name': data.get('name') or "",
-
             'phone': data.get('phone') or "",
-
             'email_from': data.get('email') or "",
-
             'street': data.get('address') or "",
-
             'city': data.get('city') or "",
-
             'zip': data.get('pincode') or "",
-
             'description': desc_text.strip(),
         }
 
@@ -303,7 +294,7 @@ def create_odoo_lead(data, ai_reply):
         # =========================
         # CHATTER MESSAGE
         # =========================
-       chatter_body = f"""
+        chatter_body = f"""
 <h3>🤖 AI Auto Reply Sent to Customer</h3>
 
 <p>
@@ -311,41 +302,40 @@ def create_odoo_lead(data, ai_reply):
 </p>
 """
 
-models.execute_kw(
-    ODOO_DB,
-    uid,
-    ODOO_PASSWORD,
-    'crm.lead',
-    'message_post',
-    [[lead_id]],
-    {
-        'body': chatter_body,
-        'body_is_html': True
-    }
-)
+        models.execute_kw(
+            ODOO_DB,
+            uid,
+            ODOO_PASSWORD,
+            'crm.lead',
+            'message_post',
+            [[lead_id]],
+            {
+                'body': chatter_body,
+                'body_is_html': True
+            }
+        )
+
         # =========================
         # SEND EMAIL FROM ODOO
         # =========================
         if data.get("email"):
 
             mail_values = {
-
                 'subject': (
                     f"Re: "
                     f"{data.get('product') or 'Your Inquiry'}"
                 ),
-
                 'body_html': f"""
 <p>
 {ai_reply.replace(chr(10), '<br/>')}
 </p>
 """,
-
                 'email_to': data.get("email"),
-
                 'email_from': ODOO_USERNAME,
+                'state': 'outgoing' # Explicitly flag it for the Odoo mail queue
             }
 
+            # Creating the mail record queues it automatically
             mail_id = models.execute_kw(
                 ODOO_DB,
                 uid,
@@ -355,14 +345,8 @@ models.execute_kw(
                 [mail_values]
             )
 
-            models.execute_kw(
-                ODOO_DB,
-                uid,
-                ODOO_PASSWORD,
-                'mail.mail',
-                'send',
-                [[mail_id]]
-            )
+            # ❌ REMOVED the models.execute_kw(..., 'mail.mail', 'send', ...) call
+            # Odoo's internal Cron task will take over and send the email shortly.
 
         return lead_id, None
 
