@@ -235,13 +235,13 @@ def merge(ai_data, regex_data):
 
     return ai_data
 
-# =========================
-# CREATE ODOO LEAD
-# =========================
 def create_odoo_lead(data, ai_reply):
 
     try:
 
+        # =========================
+        # LOGIN
+        # =========================
         common = xmlrpc.client.ServerProxy(
             f"{ODOO_URL}/xmlrpc/2/common",
             allow_none=True
@@ -260,33 +260,57 @@ def create_odoo_lead(data, ai_reply):
         )
 
         # =========================
-        # DUPLICATE CHECK
+        # CREATE CONTACT
         # =========================
-        existing = models.execute_kw(
-            ODOO_DB,
-            uid,
-            ODOO_PASSWORD,
-            'crm.lead',
-            'search',
-            [[
-                '|',
-                ('phone', '=', data.get('phone')),
-                ('email_from', '=', data.get('email'))
-            ]],
-            {'limit': 1}
-        )
+        partner_id = None
 
-        if existing:
+        if data.get("email") or data.get("name"):
 
-            return existing[0], "Duplicate Lead Skipped"
+            partner_vals = {
+                'name': data.get("name") or "Unknown",
+                'email': data.get("email") or "",
+                'phone': data.get("phone") or "",
+                'street': data.get("address") or "",
+                'city': data.get("city") or "",
+                'zip': data.get("pincode") or "",
+            }
+
+            partner_id = models.execute_kw(
+                ODOO_DB,
+                uid,
+                ODOO_PASSWORD,
+                'res.partner',
+                'create',
+                [partner_vals]
+            )
 
         # =========================
         # DESCRIPTION
         # =========================
         desc_text = data.get("description") or ""
 
+        address_parts = [
+            data.get("address"),
+            data.get("city"),
+            data.get("state"),
+            data.get("pincode"),
+            data.get("country")
+        ]
+
+        valid_address = [x for x in address_parts if x]
+
+        if valid_address:
+            desc_text += (
+                "\n\nFull Address: "
+                + ", ".join(valid_address)
+            )
+
+        # =========================
+        # CREATE LEAD
+        # =========================
         lead_vals = {
             'name': data.get('product') or "New Lead",
+            'partner_id': partner_id,
             'contact_name': data.get('name') or "",
             'phone': data.get('phone') or "",
             'email_from': data.get('email') or "",
@@ -296,9 +320,6 @@ def create_odoo_lead(data, ai_reply):
             'description': desc_text.strip(),
         }
 
-        # =========================
-        # CREATE LEAD
-        # =========================
         lead_id = models.execute_kw(
             ODOO_DB,
             uid,
@@ -307,6 +328,88 @@ def create_odoo_lead(data, ai_reply):
             'create',
             [lead_vals]
         )
+
+        # =========================
+        # SAFE AI REPLY
+        # =========================
+        if not ai_reply:
+            ai_reply = """
+Thank you for your inquiry.
+
+Our sales team will contact you shortly.
+
+Regards
+Sales Team
+"""
+
+        # =========================
+        # CHATTER
+        # =========================
+        chatter_html = f"""
+<div>
+<h3>🤖 AI Auto Reply Sent to Customer</h3>
+<p>{ai_reply.replace(chr(10), '<br/>')}</p>
+</div>
+"""
+
+        models.execute_kw(
+            ODOO_DB,
+            uid,
+            ODOO_PASSWORD,
+            'crm.lead',
+            'message_post',
+            [[lead_id]],
+            {
+                'body': chatter_html,
+                'message_type': 'comment'
+            }
+        )
+
+        # =========================
+        # SEND EMAIL
+        # =========================
+        if data.get("email"):
+
+            email_html = f"""
+<div style="font-family:Arial,sans-serif;font-size:14px;">
+<p>{ai_reply.replace(chr(10), '<br/>')}</p>
+</div>
+"""
+
+            mail_values = {
+                'subject': f"Re: {data.get('product') or 'Your Inquiry'}",
+                'body_html': email_html,
+                'email_to': data.get("email"),
+                'email_from': ODOO_USERNAME,
+                'auto_delete': False,
+            }
+
+            mail_id = models.execute_kw(
+                ODOO_DB,
+                uid,
+                ODOO_PASSWORD,
+                'mail.mail',
+                'create',
+                [mail_values]
+            )
+
+            # FORCE SEND
+            models.execute_kw(
+                ODOO_DB,
+                uid,
+                ODOO_PASSWORD,
+                'mail.mail',
+                'send',
+                [[mail_id]]
+            )
+
+        return lead_id, None
+
+    except Exception as e:
+
+        print("ODOO ERROR:", str(e))
+
+        return None, str(e)
 
         # =========================
         # CHATTER MESSAGE
