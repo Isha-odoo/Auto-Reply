@@ -255,35 +255,28 @@ def create_odoo_lead(data, ai_reply):
             [lead_vals]
         )
 
-        # =========================
-        # CHATTER MESSAGE
-        # =========================
-        chatter_body = f"""
-<b>🤖 AI Auto Reply Generated</b>
+# =========================
+# CHATTER MESSAGE
+# =========================
+chatter_body = f"""
+<b>🤖 AI Auto Reply Sent to Customer</b>
 
 <br/><br/>
-
-<b>Reply:</b>
-
-<br/>
 
 {ai_reply.replace(chr(10), '<br/>')}
 """
 
-        models.execute_kw(
-            ODOO_DB,
-            uid,
-            ODOO_PASSWORD,
-            'mail.message',
-            'create',
-            [{
-                'body': chatter_body,
-                'model': 'crm.lead',
-                'res_id': lead_id,
-                'message_type': 'comment',
-                'subtype_xmlid': 'mail.mt_comment'
-            }]
-        )
+models.execute_kw(
+    ODOO_DB,
+    uid,
+    ODOO_PASSWORD,
+    'crm.lead',
+    'message_post',
+    [[lead_id]],
+    {
+        'body': chatter_body
+    }
+)
 
         # =========================
         # SEND EMAIL FROM ODOO
